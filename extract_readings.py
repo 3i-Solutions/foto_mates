@@ -398,6 +398,25 @@ SOURCES = ('LCD', 'LED', 'WHEELS', 'HANDWRITTEN', 'PRINTED', 'NONE')
 NOT_A_REGISTER = ('HANDWRITTEN', 'PRINTED', 'NONE')
 
 
+def extract_turning(text: str) -> str | None:
+    """The TURNING line (FOTOMATES_TURNING): the wheels caught between two numbers, as
+    'place:other' pairs joined by commas. place counts the cells of CELLS from the right end
+    (1 is the last cell), so it still fits after a register code is taken off the left; other is
+    the second number seen on that wheel. The model gives the position from the left. A pair is
+    kept only when the position is a cell of CELLS and the other number is the one before the
+    digit written there (0 before 1, 9 before 0). None without a line or without a kept pair."""
+    lines = re.findall(r"^TURNING:[ \t]*(.*)$", text or '', re.IGNORECASE | re.MULTILINE)
+    cells = _cells_digits(text or '')
+    if not lines or not cells:
+        return None
+    pairs = []
+    for position, other in re.findall(r"(?<!\d)(\d{1,2})[ \t]*[: \t][ \t]*(\d)(?!\d)", lines[-1]):
+        index = int(position) - 1
+        if 0 <= index < len(cells) and (int(cells[index]) - int(other)) % 10 == 1:
+            pairs.append(f'{len(cells) - index}:{other}')
+    return ','.join(dict.fromkeys(pairs)) or None
+
+
 def extract_source(text: str) -> str | None:
     """The SOURCE line (prompt v3/v4): where the CELLS digits are physically shown; None without one."""
     answers = re.findall(r"^SOURCE:[ \t]*\**[ \t]*([A-Z]+)", text or '', re.IGNORECASE | re.MULTILINE)
@@ -1078,6 +1097,27 @@ _REPEAT_LINE = ("- Count the cells before reading. A 1 fills a whole cell even t
 if REPEAT_HINT:
     _USER_PROMPT = _swap(_USER_PROMPT, "\nWHAT TO IGNORE\n", _REPEAT_LINE + "\nWHAT TO IGNORE\n")
 
+# FOTOMATES_TURNING=1 (default off): a wheel caught between two numbers. The model wrote a third
+# number that is not on the wheel (7069[0-1]9 read 706949), and the prompt asked for the lower
+# number where readers save the one coming in. With the switch the prompt asks for one of the two
+# numbers, the higher, and for a TURNING line naming the wheel and its other number.
+TURNING = _on('FOTOMATES_TURNING')
+_TURNING_RULE_OLD = "numbers: write the lower one (9 when it turns from 9 to 0).\n"
+_TURNING_RULE_NEW = (
+    "numbers shows the bottom of one number and the top of the next: it is one of those two "
+    "numbers, never a third. Write the higher of the two, the one coming into the window (0 when "
+    "it turns from 9 to 0), and name that wheel on the TURNING line.\n")
+_TURNING_LINE = (
+    "\nOnly when a mechanical counter has a wheel caught between two numbers, add one more line:\n"
+    "TURNING: the position of that cell in CELLS, counted from the left (1 is the first cell), then "
+    "the other number seen on that wheel; several wheels comma separated. Example: CELLS 7 0 6 9 1 9 "
+    "with the fifth wheel between 0 and 1: TURNING: 5 0")
+if TURNING:
+    if PROMPT == 'compact':
+        raise ValueError("FOTOMATES_TURNING needs FOTOMATES_PROMPT v2, v3 or v4 (compact has its own ROLLING line)")
+    _USER_PROMPT = _swap(_USER_PROMPT, _TURNING_RULE_OLD, _TURNING_RULE_NEW)
+    _SYSTEM_PROMPT = _SYSTEM_PROMPT + _TURNING_LINE
+
 # FOTOMATES_FEWSHOT=1 (default off): example photos with their CELLS line, sent in the user
 # message before the photo to read. They are the rows of fewshot/examples.csv (file, cells):
 # small crops of real displays, a few hundred prompt tokens in all.
@@ -1498,6 +1538,7 @@ def settings_note() -> str:
              f'enhancer {ENHANCER}' if ENHANCER != 'light' else '',
              'rotated boxes accepted' if ROTATED else '',
              'repeated-digit line' if REPEAT_HINT else '',
+             'turning-wheel rule and TURNING line' if TURNING else '',
              f'{len(_FEWSHOTS) // 3} example photos on {FEWSHOT_ON} reads' if _FEWSHOTS else '',
              'box as four numbers' if BOX_ANSWER != 'json' else '',
              f'box photo side {BOX_SIDE:g}' if BOX_SIDE != _MIN_SIDE else '',

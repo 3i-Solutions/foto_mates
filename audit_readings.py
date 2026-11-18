@@ -18,7 +18,7 @@ import time
 from evaluation import GROUPS as EVALUATION_GROUPS, evaluate, lines as evaluation_lines
 from extract_readings import (BACKENDS as MODEL_BACKENDS, backend as model_backend, OCR_MODEL, PHOTO_TYPES, PROMPT, CROP_FIRST, REREAD_MODE, RETAKE_SCORE, THIRD_MARGIN, blank_photo, extract_box, settings_note, find_box, image_workers, photo_bytes, PhotoFileError, photo_retake_reason, _reading_digits, ocr_image,
                               server_slots, extract_blank, extract_no_meter, low_score_reasons, score_reading,
-                              NOT_A_REGISTER, extract_off, extract_source, parse_box, photo_stats, start_photo_stats,
+                              NOT_A_REGISTER, extract_off, extract_source, extract_turning, parse_box, photo_stats, start_photo_stats,
                               third_read)
 
 AUDIT_DB = Path(__file__).resolve().parent / os.environ.get('FOTOMATES_AUDIT_DB', 'audit_readings.sqlite3')
@@ -108,6 +108,7 @@ DETAIL_COLUMNS = (
     ('image_flags', 'TEXT'),            # is_blurry, is_dark, has_glare, ... that were true
     ('model_answer', 'TEXT'),           # the model's whole answer, with the timing lines after it
     ('source', 'TEXT'),                 # SOURCE (prompt v3/v4): LCD, LED, WHEELS, HANDWRITTEN, PRINTED, NONE
+    ('turning', 'TEXT'),                # FOTOMATES_TURNING: wheels between two numbers, 'place:other' (place from the right, 1 = last cell)
     ('reason_code', 'TEXT'),            # source:HANDWRITTEN (no reading), far:45 (display under FOTOMATES_FAR_PX wide)
     ('box_px_w', 'INTEGER'),            # the box the crop was cut from, in photo pixels (before enlargement)
     ('box_px_h', 'INTEGER'),
@@ -913,7 +914,8 @@ def read_one(path, month, model=None):
     details = read_details(result, reading, read.get('reread'), read.get('other'), read.get('others'),
                            read.get('box_answer'), read.get('reads'), read.get('box_reason'))
     too_long = bool(read['parts'] and read['parts'].get('too_long'))
-    return dict(row, **details, **photo_stats(), source=source, reason_code=','.join(codes) or None,
+    return dict(row, **details, **photo_stats(), source=source, turning=extract_turning(result.text),
+                reason_code=','.join(codes) or None,
                 box_px_w=box_px[0] if box_px else None, box_px_h=box_px[1] if box_px else None,
                 cells_expected=expected, cells_hint=read.get('cells_hint'),
                 model=model_backend(model).model, picture_name=path.name, extracted_reading=reading,
