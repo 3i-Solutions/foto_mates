@@ -387,6 +387,71 @@ DISAGREE_SCORE = float(os.environ.get('FOTOMATES_DISAGREE_SCORE', '0.69'))
 REREAD_EMPTY = os.environ.get('FOTOMATES_REREAD_EMPTY', '1').strip().lower() not in ('0', 'false', 'no', 'off', '')
 
 
+# Three rules from the settings test of 18-19 Nov 2026 (1,391 coloured photos of 31 October, six
+# runs). Each has its own switch and is off by default; none makes a model request of its own.
+def _switch(name):
+    return os.environ.get(name, '0').strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+# FOTOMATES_KEEP_LONGER=1 (with FOTOMATES_KEEP=agree): when the whole-photo read is the kept
+# reading with more digits after it, the whole-photo read is kept: the kept one was cut short.
+# In three runs with the same settings: 2 to 5 more of 281 typed readings matched, and 9 to 12
+# more of 382 rows the October read had right.
+KEEP_LONGER = _switch('FOTOMATES_KEEP_LONGER')
+# FOTOMATES_TYPE_FROM_READS=1: the meter type saved for a photo comes from every read of it, not
+# only the kept one: a read that saw WHEELS counts 2 for mechanical, one that saw LCD or LED 2
+# for digital, any other read 1 for the TYPE it gave; no type when no read saw digits on a
+# register. On 247 photos checked by eye: a type for a photo without a meter 40 -> 0, digital
+# meters typed mechanical 16 -> 8.
+TYPE_FROM_READS = _switch('FOTOMATES_TYPE_FROM_READS')
+# FOTOMATES_ACCEPT_AGREED=1: a reading made from two reads or more is accepted only when all
+# reads with digits gave the same digits, or the same number of digits with a score of
+# FOTOMATES_ACCEPT_SCORE (0.7) or more; any other is marked for retake. On 281 typed readings:
+# wrong readings accepted 49 -> 28, right ones 57 -> 49 (against a score of 0.7 alone).
+ACCEPT_AGREED = _switch('FOTOMATES_ACCEPT_AGREED')
+ACCEPT_SCORE = float(os.environ.get('FOTOMATES_ACCEPT_SCORE', '0.7'))
+
+
+def rules_note():
+    """The rules above that are on, for a run's first log line."""
+    notes = ['a longer whole-photo read kept' if KEEP_LONGER else '',
+             'meter type from all reads' if TYPE_FROM_READS else '',
+             f'accepted only when the reads agree, or have the same length at {ACCEPT_SCORE:g} or more' if ACCEPT_AGREED else '']
+    return ''.join('; ' + note for note in notes if note)
+
+
+def type_from_reads(reads, kept_type):
+    """FOTOMATES_TYPE_FROM_READS: 'digital', 'mechanical' or None from every read of a photo."""
+    votes, seen = {'digital': 0, 'mechanical': 0}, False
+    for one in reads:
+        source, kind = extract_source(one['result'].text), getattr(one['result'], 'device_type', None)
+        if source == 'WHEELS':
+            votes['mechanical'] += 2
+        elif source in ('LCD', 'LED'):
+            votes['digital'] += 2
+        elif kind in votes:
+            votes[kind] += 1
+        seen = seen or source in ('WHEELS', 'LCD', 'LED')
+    if not seen:
+        return None  # no read saw digits on a register: the type would be a guess
+    if votes['digital'] == votes['mechanical']:
+        return kept_type
+    return max(votes, key=votes.get)
+
+
+def reads_settled(reads, score):
+    """FOTOMATES_ACCEPT_AGREED: whether the reads of a photo back its reading. One read made: the
+    rule does not apply."""
+    if len(reads or []) < 2:
+        return True
+    said = [one['cells'] for one in reads if one.get('cells')]
+    if len(said) < 2:
+        return False
+    if len(set(said)) == 1:
+        return True
+    return len({len(cells) for cells in said}) == 1 and score is not None and score >= ACCEPT_SCORE
+
+
 def _third_how():
     """How the read after the whole photo is made, in words."""
     if REREAD_MODE != 'crop':
@@ -508,10 +573,14 @@ def _keep_agreed(path, saved, model, crop, seconds, box, box_reason):
         best = crop if crop in shared else max(shared, key=points)  # a tie keeps the earlier read
     else:
         best = max(reads, key=points)
+    longer = (KEEP_LONGER and best is not whole and bool(best['cells'])
+              and len(whole['cells']) > len(best['cells']) and whole['cells'].startswith(best['cells']))
+    if longer:  # the kept read was cut short: the whole photo shows the same digits and more
+        best = whole
     others = sorted((read for read in reads if read is not best), key=points, reverse=True)
     kept = dict(best, reread=True, seconds=seconds + sum(r['result'].reading_seconds or 0.0 for r in reads[1:]),
                 other=others[0], others=others, box_answer=box['answer'], box_reason=box_reason, reads=reads)
-    if not shared and len({read['cells'] for read in said}) > 1 and kept['score'] is not None:
+    if (longer or not shared) and len({read['cells'] for read in said}) > 1 and kept['score'] is not None:
         kept['score'] = min(kept['score'], DISAGREE_SCORE)  # each read's own score stays in its columns
     return kept
 
@@ -616,7 +685,7 @@ def read_details(result, reading, reread, other=None, other_reads=None, box_answ
     answer = re.findall(r'READING:[ \t]*([^\n]*)', result.text, re.IGNORECASE)
     written = re.sub(r'\D', '', answer[-1]) if answer else ''
     return dict(
-        device_type=result.device_type,
+        device_type=type_from_reads(reads, result.device_type) if TYPE_FROM_READS and reads else result.device_type,
         digit_probabilities=numbers(probabilities) if aligned else None,
         second_choices=' '.join(second) or None,
         weakest_digit=round(min(probabilities), 3) if aligned and probabilities else None,
@@ -911,6 +980,8 @@ def read_one(path, month, model=None):
     reason = photo_retake_reason(reading, result.clear) if reading else None
     if not reason and score is not None and score < RETAKE_SCORE:
         reason = low_score_reasons(read['parts'])[0] if read['parts'] else 'the overall confidence is low'
+    if not reason and ACCEPT_AGREED and reading and not reads_settled(read.get('reads'), score):
+        reason = 'the reads of this photo gave different digits: check it on the meter'
     details = read_details(result, reading, read.get('reread'), read.get('other'), read.get('others'),
                            read.get('box_answer'), read.get('reads'), read.get('box_reason'))
     too_long = bool(read['parts'] and read['parts'].get('too_long'))
@@ -1009,7 +1080,7 @@ def command_read(args):
     slots = server_slots(choice.servers)
     workers = args.workers or image_workers(choice, slots)
     print(f'reading with {workers} worker(s) into {args.db}; model {choice.label}; model server slots: '
-          f'{slots or "not reported"}; prompt {PROMPT}; {reread_rule()}{settings_note()}', flush=True)
+          f'{slots or "not reported"}; prompt {PROMPT}; {reread_rule()}{settings_note()}{rules_note()}', flush=True)
     started = time.monotonic()
     count = matched = failed = rejected = codes = too_long = 0
     failed_now = {}  # picture name -> path of the photos saved as an error in this run
